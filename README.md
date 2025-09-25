@@ -1,317 +1,177 @@
-# Remote Serial Monitor
+# RemoteSerialMonitor
 
-A lightweight Arduino UNO R4 WiFi library that enables viewing and sending Serial data remotely through a web browser. Perfect for IoT projects, remote debugging, and wireless monitoring.
+Arduino UNO R4 WiFi（WiFiS3）向けの**超軽量リモート・シリアルモニタ**です。  
+`Serial.print()` 互換のAPI（`print / println / printf`）で出力した文字列を、**Wi‑Fiアクセスポイント経由でブラウザにリアルタイム表示**します。
 
-## 🚀 Features
+- CPU/メモリに優しい**シンプルHTTP + ポーリング**方式（SSE/WSなし）
+- **リングバッファ**（既定：行×列=24×96 など）に保存
+- **差分取得 API**：`GET /api/log?since=<last_id>`
+- インデックスページ `/` を同梱（即見える）
+- UNO R4 WiFi + **WiFiS3** で動作（他ボードは未検証）
+---
 
-- **Real-time WebSocket Communication**: Live serial data streaming
-- **REST API Endpoints**: Access buffered logs via HTTP requests
-- **Web-based UI**: Modern, responsive interface with:
-  - Real-time log display with color-coded levels
-  - Command input box for sending data to Arduino
-  - Log filtering by level (Debug, Info, Warning, Error)
-  - Download logs functionality
-- **Non-blocking APIs**: Maintains Arduino performance
-- **Memory Efficient**: Circular buffer with configurable size
-- **Multiple Client Support**: Handle up to 4 concurrent connections
-- **Serial Drop-in Replacement**: Use like Arduino's Serial class
+## 目次
+- [RemoteSerialMonitor](#remoteserialmonitor)
+  - [目次](#目次)
+  - [クイックスタート](#クイックスタート)
+  - [インストール](#インストール)
+  - [API](#api)
+    - [使い方の流れ](#使い方の流れ)
+  - [HTTP エンドポイント](#http-エンドポイント)
+  - [メモリとサイズ調整](#メモリとサイズ調整)
+  - [例: BasicUsage](#例-basicusage)
 
-## 📋 Requirements
+---
 
-- **Arduino UNO R4 WiFi** (uses WiFiS3 library)
-- **Arduino IDE 2.0+** or PlatformIO
-- **WiFi Network** with internet access
+## クイックスタート
 
-## 📦 Installation
+1. ライブラリを `Documents/Arduino/libraries/RemoteSerialMonitor/` に配置します（構成例は後述）。  
+2. 例スケッチを書き込み、**UNO R4 WiFi** を起動。
+3. PC/スマホで SSID に接続 → ブラウザで `http://192.168.4.1/` を開く。
+4. ログが自動で流れます。
 
-### Arduino IDE
-1. Download the library as ZIP
-2. Go to **Sketch** → **Include Library** → **Add .ZIP Library**
-3. Select the downloaded ZIP file
+---
 
-### Manual Installation
-1. Clone or download this repository
-2. Place the folder in your Arduino libraries directory:
-   - Windows: `Documents/Arduino/libraries/`
-   - macOS: `~/Documents/Arduino/libraries/`
-   - Linux: `~/Arduino/libraries/`
+## インストール
 
-## 🔧 Quick Start
+```
+RemoteSerialMonitor/
+ ├─ library.properties           （任意）
+ ├─ src/
+ │   ├─ RemoteSerialMonitor.h
+ │   └─ RemoteSerialMonitor.cpp
+ └─ examples/
+     └─ BasicUsage/
+         └─ BasicUsage.ino
+```
+
+- Arduino IDE の **スケッチブックフォルダ** 内 `libraries` 直下に `RemoteSerialMonitor` フォルダごと置いてください。
+- 既存の `WiFiS3` ライブラリ（UNO R4 WiFi 標準）に依存します。
+
+---
+
+## API
 
 ```cpp
-#include <RemoteSerialMonitor.h>
+class RemoteSerialMonitor {
+public:
+  explicit RemoteSerialMonitor(uint16_t port = 80);
 
-void setup() {
+  // Wi-Fi
+  bool beginAP (const char* ssid, const char* pass);
+  bool beginSTA(const char* ssid, const char* pass, uint32_t timeout_ms = 15000);
+  IPAddress localIP() const;
+
+  // HTTPサーバ
+  void beginServer();
+  void handle();           // loop() から頻繁に呼ぶ
+
+  // 出力（Serial互換）
+  void print  (const char* s);
+  void println(const char* s);
+  void printf (const char* fmt, ...);
+
+  // リングバッファ容量（コンパイル定数）
+  uint16_t capacityLines() const; // 例：24 or 32 など
+  uint16_t capacityCols () const; // 例：96
+};
+
+// 使いやすいグローバルインスタンス
+extern RemoteSerialMonitor RemoteSerial;
+```
+
+### 使い方の流れ
+1. `RemoteSerial.beginAP(ssid, pass);`
+2. `RemoteSerial.beginServer();`
+3. `loop()` 内で `RemoteSerial.handle();` を**毎回呼ぶ**
+4. 出したい箇所で `RemoteSerial.println("message");` など
+
+---
+
+## HTTP エンドポイント
+
+- `GET /`  
+  組み込みのインデックスページ（ログビューア）を返します。
+
+- `GET /api/log?since=<id>`  
+  `id` より新しい行を JSON で返します。クライアントは、サーバから受け取った `last_id` を保持してポーリングします。  
+  例レスポンス：
+  ```json
+  {"last_id": 42, "lines": ["boot ok","A0=512","..."]}
+  ```
+
+---
+
+## メモリとサイズ調整
+
+UNO R4 WiFi の SRAM は約 **32 KB** です。ライブラリはメモリ節約を重視していますが、**用途に合わせて以下のマクロで調整**できます。
+
+```cpp
+// RemoteSerialMonitor.h をインクルードする前に定義すると上書き可能
+#define RSM_MAX_LINES 24   // 保存行数（リングバッファ）
+#define RSM_MAX_COLS  96   // 1行最大長（UTF-8, 超過は切り捨て）
+#include "RemoteSerialMonitor.h"
+```
+
+目安：  
+- 24×96 ≈ **2.3 KB**（文字） + ID配列等 ≈ **少量**  
+- 32×96 ≈ **3.2 KB**  
+- 64×128 は約 **8 KB 以上**になり、他の配列と衝突しやすいです。
+---
+
+## 例: BasicUsage
+
+```cpp
+#include <Arduino.h>
+#include <WiFiS3.h>
+
+// 必要ならここで上書き可能（例: さらに省メモリ化）
+// #define RSM_MAX_LINES 24
+// #define RSM_MAX_COLS  96
+#include "RemoteSerialMonitor.h"
+
+const char* AP_SSID = "ArduinoR4_AP";
+const char* AP_PASS = "arduino123"; // 8文字以上
+
+void setup(){
   Serial.begin(115200);
-  
-  // Configure WiFi credentials
-  RemoteSerial.setWiFiCredentials("YourWiFiSSID", "YourWiFiPassword");
-  
-  // Start the remote monitor
-  if (RemoteSerial.begin()) {
-    Serial.print("Open browser: http://");
-    Serial.println(RemoteSerial.getLocalIP());
+  delay(300);
+
+  if (!RemoteSerial.beginAP(AP_SSID, AP_PASS)) {
+    Serial.println(F("AP start failed"));
+    while (1) { delay(500); }
   }
+  RemoteSerial.beginServer();
+
+  Serial.print(F("AP SSID: ")); Serial.println(AP_SSID);
+  Serial.print(F("AP PASS: ")); Serial.println(AP_PASS);
+  Serial.print(F("AP IP  : ")); Serial.println(RemoteSerial.localIP());
+
+  RemoteSerial.println("RemoteSerialMonitor started");
+  RemoteSerial.printf("Open: http://%s/\n", RemoteSerial.localIP().toString().c_str());
 }
 
-void loop() {
-  RemoteSerial.loop(); // Essential for non-blocking operation
-  
-  // Use like Serial
-  RemoteSerial.println("Hello from Arduino!");
-  
-  delay(1000);
-}
-```
+void loop(){
+  RemoteSerial.handle();  // 必須
 
-## 📚 API Reference
-
-### Setup Methods
-
-#### `setWiFiCredentials(ssid, password)`
-Configure WiFi network credentials.
-```cpp
-RemoteSerial.setWiFiCredentials("MyNetwork", "MyPassword");
-```
-
-#### `setServerPort(port)`
-Set custom server port (default: 80).
-```cpp
-RemoteSerial.setServerPort(8080);
-```
-
-#### `setLogFilter(level)`
-Filter logs by minimum level (0=Debug, 1=Info, 2=Warning, 3=Error).
-```cpp
-RemoteSerial.setLogFilter(1); // Hide debug messages
-```
-
-### Lifecycle Methods
-
-#### `begin()`
-Initialize WiFi and start server. Returns `true` if successful.
-```cpp
-if (RemoteSerial.begin()) {
-  Serial.println("Started successfully!");
-}
-```
-
-#### `loop()`
-**Must be called regularly** in your main loop for non-blocking operation.
-```cpp
-void loop() {
-  RemoteSerial.loop(); // Essential!
-  // Your other code here...
-}
-```
-
-#### `end()`
-Stop server and disconnect WiFi.
-```cpp
-RemoteSerial.end();
-```
-
-### Status Methods
-
-#### `isConnected()`
-Check if WiFi is connected and server is running.
-
-#### `getClientCount()`
-Get number of connected web clients.
-
-#### `getLocalIP()`
-Get Arduino's IP address.
-
-### Logging Methods
-
-#### Standard Print Interface
-Use exactly like Arduino's Serial:
-```cpp
-RemoteSerial.print("Value: ");
-RemoteSerial.println(sensorValue);
-RemoteSerial.write(byteData, length);
-```
-
-#### Level-specific Logging
-```cpp
-RemoteSerial.debug("Debug information");   // Gray text
-RemoteSerial.info("General information");  // Blue text
-RemoteSerial.warning("Warning message");   // Orange text
-RemoteSerial.error("Error occurred!");     // Red text
-```
-
-#### Custom Level Logging
-```cpp
-RemoteSerial.print("Custom message", 2);   // 0=debug, 1=info, 2=warning, 3=error
-```
-
-### Buffer Management
-
-#### `getBufferedLogs(maxEntries)`
-Get JSON string of buffered logs.
-
-#### `clearBuffer()`
-Clear the circular buffer.
-
-#### `getBufferCount()`
-Get current number of entries in buffer.
-
-## 🌐 Web Interface
-
-The embedded web interface provides:
-
-- **Real-time Log Display**: Live updates via WebSocket
-- **Command Input**: Send commands to Arduino
-- **Log Filtering**: Show/hide different log levels
-- **Download Logs**: Save logs as text file
-- **Connection Status**: Visual WiFi connection indicator
-
-### REST API Endpoints
-
-- `GET /` - Main web interface
-- `GET /api/logs` - Get buffered logs as JSON
-- `GET /api/clear` - Clear log buffer
-- `POST /api/command` - Send command to Arduino
-
-## 💡 Examples
-
-### Basic Usage
-```cpp
-#include <RemoteSerialMonitor.h>
-
-const char* ssid = "YourWiFiSSID";
-const char* password = "YourWiFiPassword";
-
-void setup() {
-  Serial.begin(115200);
-  
-  RemoteSerial.setWiFiCredentials(ssid, password);
-  
-  if (RemoteSerial.begin()) {
-    RemoteSerial.info("System started");
-    Serial.print("Web UI: http://");
-    Serial.println(RemoteSerial.getLocalIP());
-  }
-}
-
-void loop() {
-  RemoteSerial.loop();
-  
-  int sensorValue = analogRead(A0);
-  RemoteSerial.info("Sensor: " + String(sensorValue));
-  
-  if (sensorValue > 800) {
-    RemoteSerial.warning("High sensor value!");
-  }
-  
-  delay(2000);
-}
-```
-
-### Advanced Features
-```cpp
-#include <RemoteSerialMonitor.h>
-
-void setup() {
-  Serial.begin(115200);
-  
-  // Custom configuration
-  RemoteSerial.setWiFiCredentials("MyNetwork", "MyPassword");
-  RemoteSerial.setServerPort(8080);
-  RemoteSerial.setLogFilter(1); // Hide debug messages
-  
-  if (RemoteSerial.begin()) {
-    RemoteSerial.info("Advanced example started");
-  }
-}
-
-void loop() {
-  RemoteSerial.loop();
-  
-  // System monitoring
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate > 10000) {
-    RemoteSerial.info("Uptime: " + String(millis() / 1000) + "s");
-    RemoteSerial.info("Clients: " + String(RemoteSerial.getClientCount()));
-    RemoteSerial.debug("Buffer: " + String(RemoteSerial.getBufferCount()));
-    
-    lastUpdate = millis();
-  }
-  
-  delay(100);
-}
-```
-
-## ⚙️ Configuration
-
-### Memory Usage
-- **Default buffer**: 1024 log entries
-- **Max message size**: 256 characters per entry
-- **Max clients**: 4 concurrent connections
-- **RAM usage**: ~300KB (adjustable via constants in header)
-
-### Customization
-Edit these constants in `RemoteSerialMonitor.h`:
-```cpp
-#define RSM_BUFFER_SIZE 1024        // Number of log entries
-#define RSM_MAX_MESSAGE_SIZE 256    // Max characters per message
-#define RSM_MAX_CLIENTS 4           // Max concurrent connections
-```
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-**WiFi Connection Failed**
-- Verify SSID and password
-- Check WiFi signal strength
-- Ensure 2.4GHz network (UNO R4 doesn't support 5GHz)
-
-**Web Interface Not Loading**
-- Check IP address in Serial Monitor
-- Verify port (default 80, or custom port)
-- Ensure firewall allows connections
-
-**Memory Issues**
-- Reduce `RSM_BUFFER_SIZE` if running low on memory
-- Call `clearBuffer()` periodically
-- Monitor with `getBufferCount()`
-
-**WebSocket Disconnections**
-- Web interface auto-reconnects every 3 seconds
-- Check WiFi stability
-- Monitor client count with `getClientCount()`
-
-### Debug Tips
-```cpp
-void setup() {
-  Serial.begin(115200);
-  
-  if (!RemoteSerial.begin()) {
-    Serial.println("Failed to start RemoteSerial");
-    Serial.print("WiFi status: ");
-    Serial.println(WiFi.status());
-  } else {
-    Serial.print("IP: ");
-    Serial.println(RemoteSerial.getLocalIP());
+  // デモ：1秒ごとにA0の値を配信
+  static uint32_t t0 = millis();
+  if (millis() - t0 > 1000){
+    t0 += 1000;
+    int v = analogRead(A0);
+    RemoteSerial.printf("A0=%d\n", v);
   }
 }
 ```
 
-## 📄 License
+<!-- ## 設計メモ
 
-MIT License - see [LICENSE](LICENSE) file.
+- **通信方式**：HTTP/1.1 + 簡易ポーリング（SSE/WSよりRAM使用量が小さく、実装が堅牢）。
+- **Content-Length**：
+  - HTMLは正確な `Content-Length` を送信（PROGMEM からチャンクコピー）。
+  - JSONは **チャンク状にストリーミング**し、`Connection: close` で終端。
+- **文字コード**：UTF‑8（1行最大長 `RSM_MAX_COLS`、超過は切り捨て）。
+- **CORS**：`Access-Control-Allow-Origin: *` を付与。外部ページからフェッチする用途も可能。
+- **セキュリティ**：SoftAP のパスワードは **8文字以上**。公開環境では使わないでください。
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test with Arduino UNO R4 WiFi
-5. Submit a pull request
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/KueeSummerCamp2nd/remote-serial-monitor/issues)
-- **Examples**: See `examples/` directory
-- **Documentation**: This README and inline code comments
+--- -->
