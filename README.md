@@ -3,12 +3,12 @@
 Arduino UNO R4 WiFi（WiFiS3）向けの**超軽量リモート・シリアルモニタ**です。  
 `Serial.print()` 互換のAPI（`print / println / printf`）で出力した文字列を、**Wi‑Fiアクセスポイント経由でブラウザにリアルタイム表示**します。
 
-- CPU/メモリに優しい**シンプルHTTP + ポーリング**方式（SSE/WSなし）
+<!-- - CPU/メモリに優しい**シンプルHTTP + ポーリング**方式（SSE/WSなし）
 - **リングバッファ**（既定：行×列=24×96 など）に保存
 - **差分取得 API**：`GET /api/log?since=<last_id>`
 - インデックスページ `/` を同梱（即見える）
-- UNO R4 WiFi + **WiFiS3** で動作（他ボードは未検証）
----
+- UNO R4 WiFi + **WiFiS3** で動作（他ボードは未検証） -->
+<!-- --- -->
 
 ## 目次
 - [RemoteSerialMonitor](#remoteserialmonitor)
@@ -18,8 +18,8 @@ Arduino UNO R4 WiFi（WiFiS3）向けの**超軽量リモート・シリアル�
   - [API](#api)
     - [使い方の流れ](#使い方の流れ)
   - [HTTP エンドポイント](#http-エンドポイント)
-  - [メモリとサイズ調整](#メモリとサイズ調整)
   - [例: BasicUsage](#例-basicusage)
+  - [メモリとサイズ調整](#メモリとサイズ調整)
 
 ---
 
@@ -70,10 +70,6 @@ public:
   void print  (const char* s);
   void println(const char* s);
   void printf (const char* fmt, ...);
-
-  // リングバッファ容量（コンパイル定数）
-  uint16_t capacityLines() const; // 例：24 or 32 など
-  uint16_t capacityCols () const; // 例：96
 };
 
 // 使いやすいグローバルインスタンス
@@ -100,23 +96,6 @@ extern RemoteSerialMonitor RemoteSerial;
   {"last_id": 42, "lines": ["boot ok","A0=512","..."]}
   ```
 
----
-
-## メモリとサイズ調整
-
-UNO R4 WiFi の SRAM は約 **32 KB** です。ライブラリはメモリ節約を重視していますが、**用途に合わせて以下のマクロで調整**できます。
-
-```cpp
-// RemoteSerialMonitor.h をインクルードする前に定義すると上書き可能
-#define RSM_MAX_LINES 24   // 保存行数（リングバッファ）
-#define RSM_MAX_COLS  96   // 1行最大長（UTF-8, 超過は切り捨て）
-#include "RemoteSerialMonitor.h"
-```
-
-目安：  
-- 24×96 ≈ **2.3 KB**（文字） + ID配列等 ≈ **少量**  
-- 32×96 ≈ **3.2 KB**  
-- 64×128 は約 **8 KB 以上**になり、他の配列と衝突しやすいです。
 ---
 
 ## 例: BasicUsage
@@ -163,6 +142,23 @@ void loop(){
   }
 }
 ```
+
+## メモリとサイズ調整
+
+UNO R4 WiFi の SRAM は約 **32 KB** です。ライブラリはメモリ節約を重視していますが、**用途に合わせて以下のマクロで調整**できます。
+
+```cpp
+// RemoteSerialMonitor.h をインクルードする前に定義すると上書き可能
+#define RSM_MAX_LINES 24   // 保存行数（リングバッファ）
+#define RSM_MAX_COLS  96   // 1行最大長（UTF-8, 超過は切り捨て）
+#include "RemoteSerialMonitor.h"
+```
+
+目安：  
+- 24×96 ≈ **2.3 KB**（文字） + ID配列等 ≈ **少量**  
+- 32×96 ≈ **3.2 KB**  
+- 64×128 は約 **8 KB 以上**になり、他の配列と衝突しやすいです。
+---
 
 <!-- ## 設計メモ
 
