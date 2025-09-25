@@ -1,6 +1,6 @@
 # RemoteSerialMonitor
 
-Arduino UNO R4 WiFi（WiFiS3）向けの**超軽量リモート・シリアルモニタ**です。  
+Arduino UNO R4 WiFi（WiFiS3）向けの**リモート・シリアルモニタ**です。  
 `Serial.print()` 互換のAPI（`print / println / printf`）で出力した文字列を、**Wi‑Fiアクセスポイント経由でブラウザにリアルタイム表示**します。
 
 <!-- - CPU/メモリに優しい**シンプルHTTP + ポーリング**方式（SSE/WSなし）
