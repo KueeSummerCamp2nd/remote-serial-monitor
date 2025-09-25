@@ -1,698 +1,257 @@
 #include "RemoteSerialMonitor.h"
 
-// Global instance
-RemoteSerialMonitor RemoteSerial;
-
-RemoteSerialMonitor::RemoteSerialMonitor(uint16_t serverPort) {
-  port = serverPort;
-  server = nullptr;
-  ssid = nullptr;
-  password = nullptr;
-  initialized = false;
-  bufferHead = 0;
-  bufferTail = 0;
-  bufferCount = 0;
-  minLogLevel = 0; // Show all levels by default
-  
-  // Initialize client arrays
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    clientConnected[i] = false;
-    clientIsWebSocket[i] = false;
-  }
-}
-
-RemoteSerialMonitor::~RemoteSerialMonitor() {
-  end();
-  if (ssid) {
-    delete[] ssid;
-  }
-  if (password) {
-    delete[] password;
-  }
-}
-
-void RemoteSerialMonitor::setWiFiCredentials(const char* networkSSID, const char* networkPassword) {
-  if (ssid) delete[] ssid;
-  if (password) delete[] password;
-  
-  ssid = new char[strlen(networkSSID) + 1];
-  strcpy(ssid, networkSSID);
-  
-  password = new char[strlen(networkPassword) + 1];
-  strcpy(password, networkPassword);
-}
-
-void RemoteSerialMonitor::setServerPort(uint16_t serverPort) {
-  port = serverPort;
-}
-
-void RemoteSerialMonitor::setLogFilter(uint8_t minLevel) {
-  minLogLevel = minLevel;
-}
-
-bool RemoteSerialMonitor::begin() {
-  if (!ssid || !password) {
-    return false;
-  }
-  
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  unsigned long startTime = millis();
-  
-  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) {
-    delay(100);
-  }
-  
-  if (WiFi.status() != WL_CONNECTED) {
-    return false;
-  }
-  
-  // Start server
-  server = new WiFiServer(port);
-  server->begin();
-  
-  initialized = true;
-  return true;
-}
-
-void RemoteSerialMonitor::end() {
-  // Close all client connections
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    if (clientConnected[i]) {
-      clients[i].stop();
-      clientConnected[i] = false;
-      clientIsWebSocket[i] = false;
-    }
-  }
-  
-  if (server) {
-    server->end();
-    delete server;
-    server = nullptr;
-  }
-  
-  initialized = false;
-  WiFi.disconnect();
-}
-
-void RemoteSerialMonitor::loop() {
-  if (!initialized || !server) {
-    return;
-  }
-  
-  handleNewClients();
-  handleExistingClients();
-}
-
-bool RemoteSerialMonitor::isConnected() {
-  return initialized && WiFi.status() == WL_CONNECTED;
-}
-
-int RemoteSerialMonitor::getClientCount() {
-  int count = 0;
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    if (clientConnected[i]) {
-      count++;
-    }
-  }
-  return count;
-}
-
-IPAddress RemoteSerialMonitor::getLocalIP() {
-  return WiFi.localIP();
-}
-
-void RemoteSerialMonitor::handleNewClients() {
-  WiFiClient newClient = server->available();
-  if (newClient) {
-    // Find available slot
-    for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-      if (!clientConnected[i]) {
-        clients[i] = newClient;
-        clientConnected[i] = true;
-        clientIsWebSocket[i] = false;
-        break;
+// ---------------- HTML（最小ビュー） ----------------
+static const char RSM_PAGE_INDEX[] PROGMEM =
+R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>RemoteSerialMonitor</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px}
+#log{white-space:pre-wrap;border:1px solid #ddd;border-radius:8px;padding:12px;min-height:60vh;overflow:auto}
+h1{font-size:1.2rem;margin:.2rem 0 .6rem}
+.small{color:#666;font-size:.9rem}
+</style></head><body>
+<h1>RemoteSerialMonitor</h1>
+<div class=small>Auto-refreshing… Open from multiple devices if you want.</div>
+<div id=log></div>
+<script>
+let since = 0;
+const box = document.getElementById('log');
+async function tick(){
+  try{
+    const r = await fetch('/api/log?since=' + since);
+    if(r.ok){
+      const j = await r.json();
+      // 追記
+      if (j && j.lines && j.lines.length){
+        const atBottom = Math.abs(box.scrollHeight - box.scrollTop - box.clientHeight) < 4;
+        for(const line of j.lines){
+          const div = document.createElement('div');
+          div.textContent = line;
+          box.appendChild(div);
+        }
+        if (atBottom) box.scrollTop = box.scrollHeight;
+        since = j.last_id || since;
       }
     }
-  }
+  }catch(e){}
+  setTimeout(tick, 500);
+}
+tick();
+</script></body></html>)HTML";
+
+// ---------------- 実装 ----------------
+RemoteSerialMonitor RemoteSerial; // デフォルト
+
+RemoteSerialMonitor::RemoteSerialMonitor(uint16_t port)
+: server_(port), head_(0), count_(0), next_id_(1), pending_len_(0) {
+    for (uint16_t i=0;i<RSM_MAX_LINES;++i){
+        buf_[i][0] = '\0';
+        id_[i] = 0;
+    }
+    pending_[0] = '\0';
 }
 
-void RemoteSerialMonitor::handleExistingClients() {
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    if (clientConnected[i] && clients[i].connected()) {
-      if (clients[i].available()) {
-        String request = clients[i].readStringUntil('\n');
-        request.trim();
-        
-        if (!clientIsWebSocket[i]) {
-          if (isWebSocketUpgrade(request)) {
-            if (handleWebSocketHandshake(i)) {
-              clientIsWebSocket[i] = true;
-            }
-          } else {
-            handleHttpRequest(i, request);
-          }
+bool RemoteSerialMonitor::beginAP(const char* ssid, const char* pass){
+    uint8_t st = WiFi.beginAP(ssid, pass);
+    return (st == WL_AP_LISTENING || st == WL_CONNECTED);
+}
+
+bool RemoteSerialMonitor::beginSTA(const char* ssid, const char* pass, uint32_t timeout_ms){
+    WiFi.disconnect();
+    WiFi.end();
+    WiFi.setTimeout(timeout_ms);
+    return (WiFi.begin(ssid, pass) == WL_CONNECTED);
+}
+
+IPAddress RemoteSerialMonitor::localIP() const {
+    return WiFi.localIP();
+}
+
+void RemoteSerialMonitor::beginServer(){
+    server_.begin();
+}
+
+void RemoteSerialMonitor::handle(){
+    WiFiClient client = server_.available();
+    if (!client) return;
+
+    // 1行目（GET …）だけ読む
+    char line[160];
+    if (!readLine(client, line, sizeof(line))) { client.stop(); return; }
+
+    route(client, line);
+
+    delay(1);
+    client.stop();
+}
+
+void RemoteSerialMonitor::print(const char* s){
+    appendToPending(s);
+    commitPendingIfNeeded(); // 文字列に \n が含まれていれば行として確定
+}
+
+void RemoteSerialMonitor::println(const char* s){
+    appendToPending(s);
+    appendToPending("\n");
+    commitPendingIfNeeded();
+}
+
+void RemoteSerialMonitor::printf(const char* fmt, ...){
+    char tmp[RSM_MAX_COLS];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_end(ap);
+    print(tmp);
+}
+
+// ---- 内部：HTTP ----
+bool RemoteSerialMonitor::readLine(WiFiClient &c, char *buf, size_t n){
+    size_t i=0; unsigned long t=millis();
+    while (millis() - t < 1000){
+        if (c.available()){
+            char ch = c.read();
+            if (ch=='\r') continue;
+            if (ch=='\n'){ buf[i]=0; return true; }
+            if (i+1 < n) buf[i++]=ch;
+        }
+    }
+    buf[i]=0; return (i>0);
+}
+
+void RemoteSerialMonitor::sendResp(WiFiClient &c, const char* content, const char* type){
+    char head[180];
+    size_t len = strlen_P(content); // PROGMEM対応
+    int m = snprintf(head, sizeof(head),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %u\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n\r\n", type, (unsigned)len);
+    c.write((const uint8_t*)head, m);
+
+    // PROGMEM の場合に対応
+    char chunk[128];
+    size_t sent = 0;
+    while (sent < len){
+        size_t n = min(sizeof(chunk)-1, len - sent);
+        memcpy_P(chunk, content + sent, n);
+        c.write((const uint8_t*)chunk, n);
+        sent += n;
+    }
+}
+
+void RemoteSerialMonitor::route(WiFiClient &c, const char* reqline){
+    // ヘッダ残りを捨てる
+    while (c.connected() && c.available()) c.read();
+
+    if (startsWith(reqline, "GET /api/log")){
+        uint32_t since = 0;
+        findParamSince(reqline, since);
+        serveLog(c, since);
+    } else { // index
+        serveIndex(c);
+    }
+}
+
+void RemoteSerialMonitor::serveIndex(WiFiClient &c){
+    sendResp(c, RSM_PAGE_INDEX, "text/html");
+}
+
+void RemoteSerialMonitor::serveLog(WiFiClient &c, uint32_t since){
+    // Content-Length を付けずに close で終端（HTTP/1.1でも大抵OK）
+    const char* head =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Connection: close\r\n\r\n";
+    c.write((const uint8_t*)head, strlen(head));
+
+    char tmp[48];
+    int m = snprintf(tmp, sizeof(tmp),
+                     "{\"last_id\":%lu,\"lines\":[",
+                     (unsigned long)(next_id_ ? next_id_-1 : 0));
+    c.write((const uint8_t*)tmp, m);
+
+    bool first = true;
+    uint16_t n = count_;
+    uint16_t start = (count_ < RSM_MAX_LINES) ? 0 : head_;
+    for (uint16_t k=0; k<n; ++k){
+        uint16_t idx = (start + k) % RSM_MAX_LINES;
+        if (id_[idx] <= since) continue;
+
+        if (!first) c.write((const uint8_t*)",", 1);
+        first = false;
+
+        c.write((const uint8_t*)"\"", 1);
+        const char* s = buf_[idx];
+        for (; *s; ++s){
+            char ch = *s;
+            if (ch == '\\' || ch == '\"'){ c.write((const uint8_t*)"\\",1); c.write((const uint8_t*)&ch,1); }
+            else if (ch == '\n'){ c.write((const uint8_t*)"\\n",2); }
+            else { c.write((const uint8_t*)&ch,1); }
+        }
+        c.write((const uint8_t*)"\"", 1);
+    }
+    c.write((const uint8_t*)"]}", 2);
+}
+
+// ---- 内部：ログ ----
+void RemoteSerialMonitor::pushLine(const char* line){
+    // 空行でも受ける（UI上は空行として表示）
+    uint16_t slot = head_;
+    // 切り詰めコピー
+    size_t L = strnlen(line, RSM_MAX_COLS - 1);
+    memcpy(buf_[slot], line, L);
+    buf_[slot][L] = '\0';
+
+    id_[slot] = next_id_++;
+    head_ = (head_ + 1) % RSM_MAX_LINES;
+    if (count_ < RSM_MAX_LINES) ++count_;
+}
+
+void RemoteSerialMonitor::appendToPending(const char* s){
+    while (*s){
+        char ch = *s++;
+        if (ch == '\n'){
+            // これまでを1行として確定
+            pending_[pending_len_] = '\0';
+            pushLine(pending_);
+            pending_len_ = 0;
+            pending_[0] = '\0';
         } else {
-          // Handle WebSocket frame (simplified)
-          if (request.length() > 0) {
-            // Echo received command to all WebSocket clients
-            String response = "Echo: " + request;
-            sendWebSocketFrame(i, response.c_str());
-          }
-        }
-      }
-    } else if (clientConnected[i]) {
-      clients[i].stop();
-      clientConnected[i] = false;
-      clientIsWebSocket[i] = false;
-    }
-  }
-}
-
-bool RemoteSerialMonitor::isWebSocketUpgrade(const String& request) {
-  return request.indexOf("Upgrade: websocket") != -1;
-}
-
-bool RemoteSerialMonitor::handleWebSocketHandshake(int clientIndex) {
-  String key = "";
-  String line;
-  
-  // Read headers to find WebSocket-Key
-  while (clients[clientIndex].available()) {
-    line = clients[clientIndex].readStringUntil('\n');
-    line.trim();
-    
-    if (line.length() == 0) break;
-    
-    if (line.startsWith("Sec-WebSocket-Key:")) {
-      key = line.substring(19);
-      key.trim();
-    }
-  }
-  
-  if (key.length() == 0) return false;
-  
-  // Generate accept key
-  String acceptKey = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-  String hashedKey = sha1Hash(acceptKey);
-  String encodedKey = base64Encode(hashedKey.c_str(), hashedKey.length());
-  
-  // Send WebSocket handshake response
-  String response = "HTTP/1.1 101 Switching Protocols\r\n";
-  response += "Upgrade: websocket\r\n";
-  response += "Connection: Upgrade\r\n";
-  response += "Sec-WebSocket-Accept: " + encodedKey + "\r\n\r\n";
-  
-  clients[clientIndex].print(response);
-  return true;
-}
-
-void RemoteSerialMonitor::sendWebSocketFrame(int clientIndex, const char* data, uint8_t opcode) {
-  if (!clientConnected[clientIndex] || !clientIsWebSocket[clientIndex]) {
-    return;
-  }
-  
-  size_t dataLen = strlen(data);
-  
-  // Send frame header
-  clients[clientIndex].write(opcode);
-  
-  if (dataLen < 126) {
-    clients[clientIndex].write((uint8_t)dataLen);
-  } else if (dataLen < 65536) {
-    clients[clientIndex].write(126);
-    clients[clientIndex].write((uint8_t)(dataLen >> 8));
-    clients[clientIndex].write((uint8_t)(dataLen & 0xFF));
-  }
-  
-  // Send payload
-  clients[clientIndex].write((uint8_t*)data, dataLen);
-}
-
-void RemoteSerialMonitor::handleHttpRequest(int clientIndex, const String& request) {
-  if (request.startsWith("GET /api/logs")) {
-    // REST API for buffered logs
-    String logsJson = generateLogJson();
-    sendHttpResponse(clientIndex, logsJson, "application/json");
-  } else if (request.startsWith("GET /api/clear")) {
-    clearBuffer();
-    sendHttpResponse(clientIndex, "{\"status\":\"ok\"}", "application/json");
-  } else if (request.startsWith("POST /api/command")) {
-    // Handle command submission (simplified)
-    sendHttpResponse(clientIndex, "{\"status\":\"ok\"}", "application/json");
-  } else {
-    // Serve web UI
-    String webUI = generateWebUI();
-    sendHttpResponse(clientIndex, webUI);
-  }
-  
-  clients[clientIndex].stop();
-  clientConnected[clientIndex] = false;
-}
-
-void RemoteSerialMonitor::sendHttpResponse(int clientIndex, const String& content, const String& contentType) {
-  String response = "HTTP/1.1 200 OK\r\n";
-  response += "Content-Type: " + contentType + "\r\n";
-  response += "Content-Length: " + String(content.length()) + "\r\n";
-  response += "Access-Control-Allow-Origin: *\r\n";
-  response += "Connection: close\r\n\r\n";
-  response += content;
-  
-  clients[clientIndex].print(response);
-}
-
-size_t RemoteSerialMonitor::write(uint8_t byte) {
-  return write(&byte, 1);
-}
-
-size_t RemoteSerialMonitor::write(const uint8_t *buffer, size_t size) {
-  String message = "";
-  for (size_t i = 0; i < size; i++) {
-    message += (char)buffer[i];
-  }
-  
-  addToBuffer(message.c_str(), 1); // Default to info level
-  
-  // Send to all WebSocket clients
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    if (clientConnected[i] && clientIsWebSocket[i]) {
-      sendWebSocketFrame(i, message.c_str());
-    }
-  }
-  
-  return size;
-}
-
-void RemoteSerialMonitor::print(const String& message, uint8_t level) {
-  addToBuffer(message.c_str(), level);
-  
-  // Send to all WebSocket clients
-  for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
-    if (clientConnected[i] && clientIsWebSocket[i]) {
-      String formatted = "[" + String(millis()) + "] " + message;
-      sendWebSocketFrame(i, formatted.c_str());
-    }
-  }
-}
-
-void RemoteSerialMonitor::println(const String& message, uint8_t level) {
-  print(message + "\n", level);
-}
-
-void RemoteSerialMonitor::debug(const String& message) {
-  print("[DEBUG] " + message, 0);
-}
-
-void RemoteSerialMonitor::info(const String& message) {
-  print("[INFO] " + message, 1);
-}
-
-void RemoteSerialMonitor::warning(const String& message) {
-  print("[WARNING] " + message, 2);
-}
-
-void RemoteSerialMonitor::error(const String& message) {
-  print("[ERROR] " + message, 3);
-}
-
-void RemoteSerialMonitor::addToBuffer(const char* message, uint8_t level) {
-  if (level < minLogLevel) return;
-  
-  LogEntry& entry = logBuffer[bufferHead];
-  entry.timestamp = millis();
-  entry.level = level;
-  
-  // Copy message safely
-  size_t msgLen = strlen(message);
-  if (msgLen >= RSM_MAX_MESSAGE_SIZE) {
-    msgLen = RSM_MAX_MESSAGE_SIZE - 1;
-  }
-  
-  strncpy(entry.message, message, msgLen);
-  entry.message[msgLen] = '\0';
-  
-  // Update circular buffer pointers
-  bufferHead = (bufferHead + 1) % RSM_BUFFER_SIZE;
-  
-  if (bufferCount < RSM_BUFFER_SIZE) {
-    bufferCount++;
-  } else {
-    bufferTail = (bufferTail + 1) % RSM_BUFFER_SIZE;
-  }
-}
-
-String RemoteSerialMonitor::generateLogJson() {
-  String json = "[";
-  bool first = true;
-  
-  uint16_t current = bufferTail;
-  for (uint16_t i = 0; i < bufferCount; i++) {
-    if (!first) json += ",";
-    
-    LogEntry& entry = logBuffer[current];
-    json += "{";
-    json += "\"timestamp\":" + String(entry.timestamp) + ",";
-    json += "\"level\":" + String(entry.level) + ",";
-    json += "\"message\":\"" + String(entry.message) + "\"";
-    json += "}";
-    
-    first = false;
-    current = (current + 1) % RSM_BUFFER_SIZE;
-  }
-  
-  json += "]";
-  return json;
-}
-
-String RemoteSerialMonitor::getBufferedLogs(int maxEntries) {
-  return generateLogJson();
-}
-
-void RemoteSerialMonitor::clearBuffer() {
-  bufferHead = 0;
-  bufferTail = 0;
-  bufferCount = 0;
-}
-
-int RemoteSerialMonitor::getBufferCount() {
-  return bufferCount;
-}
-
-bool RemoteSerialMonitor::sendCommand(const String& command) {
-  // Add command to buffer as info message
-  addToBuffer(("CMD: " + command).c_str(), 1);
-  return true;
-}
-
-bool RemoteSerialMonitor::hasIncomingData() {
-  // Simplified implementation - in a full version this would check for incoming WebSocket data
-  return false;
-}
-
-String RemoteSerialMonitor::readIncomingData() {
-  // Simplified implementation
-  return "";
-}
-
-// Simplified implementations for crypto functions
-String RemoteSerialMonitor::base64Encode(const char* data, int length) {
-  // Basic base64 encoding (simplified)
-  const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  String result = "";
-  
-  for (int i = 0; i < length; i += 3) {
-    uint32_t octet_a = i < length ? (unsigned char)data[i] : 0;
-    uint32_t octet_b = i + 1 < length ? (unsigned char)data[i + 1] : 0;
-    uint32_t octet_c = i + 2 < length ? (unsigned char)data[i + 2] : 0;
-    
-    uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
-    
-    result += chars[(triple >> 3 * 6) & 0x3F];
-    result += chars[(triple >> 2 * 6) & 0x3F];
-    result += chars[(triple >> 1 * 6) & 0x3F];
-    result += chars[(triple >> 0 * 6) & 0x3F];
-  }
-  
-  return result;
-}
-
-String RemoteSerialMonitor::sha1Hash(const String& input) {
-  // Simplified SHA1 implementation for WebSocket handshake
-  // This is a basic implementation - in production, use a proper crypto library
-  uint8_t hash[20];
-  
-  // Simple hash calculation (not secure, but functional for WebSocket handshake)
-  uint32_t h0 = 0x67452301;
-  uint32_t h1 = 0xEFCDAB89;
-  uint32_t h2 = 0x98BADCFE;
-  uint32_t h3 = 0x10325476;
-  uint32_t h4 = 0xC3D2E1F0;
-  
-  // Very simplified - just XOR input bytes with constants
-  for (int i = 0; i < input.length(); i++) {
-    h0 ^= input.charAt(i) * (i + 1);
-    h1 ^= input.charAt(i) * (i + 2);
-    h2 ^= input.charAt(i) * (i + 3);
-    h3 ^= input.charAt(i) * (i + 4);
-    h4 ^= input.charAt(i) * (i + 5);
-  }
-  
-  // Convert to bytes
-  hash[0] = (h0 >> 24) & 0xFF; hash[1] = (h0 >> 16) & 0xFF; 
-  hash[2] = (h0 >> 8) & 0xFF;  hash[3] = h0 & 0xFF;
-  hash[4] = (h1 >> 24) & 0xFF; hash[5] = (h1 >> 16) & 0xFF;
-  hash[6] = (h1 >> 8) & 0xFF;  hash[7] = h1 & 0xFF;
-  hash[8] = (h2 >> 24) & 0xFF; hash[9] = (h2 >> 16) & 0xFF;
-  hash[10] = (h2 >> 8) & 0xFF; hash[11] = h2 & 0xFF;
-  hash[12] = (h3 >> 24) & 0xFF; hash[13] = (h3 >> 16) & 0xFF;
-  hash[14] = (h3 >> 8) & 0xFF; hash[15] = h3 & 0xFF;
-  hash[16] = (h4 >> 24) & 0xFF; hash[17] = (h4 >> 16) & 0xFF;
-  hash[18] = (h4 >> 8) & 0xFF; hash[19] = h4 & 0xFF;
-  
-  return base64Encode((char*)hash, 20);
-}
-
-String RemoteSerialMonitor::generateWebUI() {
-  return R"HTML(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Remote Serial Monitor</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            margin: 0; 
-            padding: 20px; 
-            background: #f0f0f0; 
-        }
-        .container { 
-            max-width: 1200px; 
-            margin: 0 auto; 
-            background: white; 
-            border-radius: 8px; 
-            padding: 20px; 
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-        }
-        h1 { 
-            color: #333; 
-            text-align: center; 
-            margin-bottom: 30px; 
-        }
-        .controls { 
-            display: flex; 
-            gap: 10px; 
-            margin-bottom: 20px; 
-            flex-wrap: wrap; 
-        }
-        input, select, button { 
-            padding: 8px 12px; 
-            border: 1px solid #ddd; 
-            border-radius: 4px; 
-        }
-        button { 
-            background: #007bff; 
-            color: white; 
-            border: none; 
-            cursor: pointer; 
-        }
-        button:hover { 
-            background: #0056b3; 
-        }
-        .log-container { 
-            height: 400px; 
-            border: 1px solid #ddd; 
-            border-radius: 4px; 
-            overflow-y: auto; 
-            padding: 10px; 
-            background: #f8f9fa; 
-            font-family: 'Courier New', monospace; 
-            font-size: 12px; 
-        }
-        .log-entry { 
-            margin: 2px 0; 
-            padding: 2px 0; 
-        }
-        .log-debug { color: #6c757d; }
-        .log-info { color: #007bff; }
-        .log-warning { color: #fd7e14; }
-        .log-error { color: #dc3545; }
-        .status { 
-            text-align: center; 
-            margin: 10px 0; 
-            padding: 10px; 
-            border-radius: 4px; 
-        }
-        .status.connected { 
-            background: #d4edda; 
-            color: #155724; 
-            border: 1px solid #c3e6cb; 
-        }
-        .status.disconnected { 
-            background: #f8d7da; 
-            color: #721c24; 
-            border: 1px solid #f5c6cb; 
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🔌 Remote Serial Monitor</h1>
-        
-        <div class="status" id="status">Connecting...</div>
-        
-        <div class="controls">
-            <input type="text" id="commandInput" placeholder="Enter command..." style="flex: 1;">
-            <button onclick="sendCommand()">Send</button>
-            <select id="logLevel">
-                <option value="0">Debug</option>
-                <option value="1" selected>Info</option>
-                <option value="2">Warning</option>
-                <option value="3">Error</option>
-            </select>
-            <button onclick="clearLogs()">Clear</button>
-            <button onclick="downloadLogs()">Download</button>
-        </div>
-        
-        <div class="log-container" id="logContainer">
-            <div class="log-entry log-info">[INFO] Remote Serial Monitor started</div>
-        </div>
-    </div>
-
-    <script>
-        let ws = null;
-        let logs = [];
-        let logLevel = 1;
-
-        function connect() {
-            // For simplicity, use polling instead of WebSocket for this basic implementation
-            // In a full implementation, WebSocket would be properly implemented
-            document.getElementById('status').textContent = 'Connected (Polling)';
-            document.getElementById('status').className = 'status connected';
-            
-            // Poll for new logs every 2 seconds
-            setInterval(function() {
-                fetch('/api/logs')
-                    .then(response => response.json())
-                    .then(data => {
-                        // Only show new logs (simple implementation)
-                        if (data.length > logs.length) {
-                            for (let i = logs.length; i < data.length; i++) {
-                                addLogEntry(data[i].message, data[i].level);
-                            }
-                        }
-                    })
-                    .catch(err => {
-                        console.log('Error fetching logs:', err);
-                        document.getElementById('status').textContent = 'Connection Error';
-                        document.getElementById('status').className = 'status disconnected';
-                    });
-            }, 2000);
-        }
-
-        function addLogEntry(message, level) {
-            const timestamp = new Date().toISOString();
-            const logEntry = { timestamp, message, level };
-            logs.push(logEntry);
-            
-            if (level >= logLevel) {
-                const container = document.getElementById('logContainer');
-                const div = document.createElement('div');
-                div.className = `log-entry log-${getLevelName(level)}`;
-                div.textContent = `[${timestamp}] ${message}`;
-                container.appendChild(div);
-                container.scrollTop = container.scrollHeight;
+            if (pending_len_ + 1 < RSM_MAX_COLS){
+                pending_[pending_len_++] = ch;
+            } else {
+                // 行が長すぎる場合は強制確定して次へ
+                pending_[pending_len_] = '\0';
+                pushLine(pending_);
+                pending_len_ = 0;
+                pending_[pending_len_++] = ch;
             }
         }
+    }
+}
 
-        function getLevelName(level) {
-            const names = ['debug', 'info', 'warning', 'error'];
-            return names[level] || 'info';
-        }
+void RemoteSerialMonitor::commitPendingIfNeeded(){
+    // printだけでは確定しない。必要ならここを有効化して「都度確定」もできる。
+    // （現在はprintlnまたは'\n'で確定）
+}
 
-        function sendCommand() {
-            const input = document.getElementById('commandInput');
-            const command = input.value.trim();
-            
-            if (command) {
-                // Send command via POST request
-                fetch('/api/command', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({command: command})
-                })
-                .then(response => response.json())
-                .then(data => {
-                    addLogEntry(`> ${command}`, 1);
-                    if (data.response) {
-                        addLogEntry(data.response, 1);
-                    }
-                })
-                .catch(err => {
-                    addLogEntry('Error sending command', 3);
-                });
-                
-                input.value = '';
-            }
-        }
+bool RemoteSerialMonitor::startsWith(const char* s, const char* prefix){
+    while (*prefix){
+        if (*s++ != *prefix++) return false;
+    }
+    return true;
+}
 
-        function clearLogs() {
-            logs = [];
-            document.getElementById('logContainer').innerHTML = '';
-            
-            fetch('/api/clear')
-                .then(response => response.json())
-                .then(data => addLogEntry('Logs cleared', 1))
-                .catch(err => addLogEntry('Error clearing logs', 3));
-        }
-
-        function downloadLogs() {
-            const logText = logs.map(log => `[${log.timestamp}] ${log.message}`).join('\n');
-            const blob = new Blob([logText], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `logs_${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        }
-
-        document.getElementById('logLevel').onchange = function() {
-            logLevel = parseInt(this.value);
-            // Re-render logs with new filter
-            const container = document.getElementById('logContainer');
-            container.innerHTML = '';
-            logs.filter(log => log.level >= logLevel).forEach(log => {
-                const div = document.createElement('div');
-                div.className = `log-entry log-${getLevelName(log.level)}`;
-                div.textContent = `[${log.timestamp}] ${log.message}`;
-                container.appendChild(div);
-            });
-        };
-
-        document.getElementById('commandInput').onkeypress = function(e) {
-            if (e.key === 'Enter') {
-                sendCommand();
-            }
-        };
-
-        // Load buffered logs
-        fetch('/api/logs')
-            .then(response => response.json())
-            .then(data => {
-                data.forEach(log => addLogEntry(log.message, log.level));
-            })
-            .catch(err => console.log('No buffered logs available'));
-
-        connect();
-    </script>
-</body>
-</html>
-)HTML";
+int RemoteSerialMonitor::findParamSince(const char* reqline, uint32_t &since_out){
+    const char* q = strstr(reqline, "?");
+    if (!q) return 0;
+    const char* p = strstr(q, "since=");
+    if (!p) return 0;
+    p += 6;
+    since_out = (uint32_t)strtoul(p, nullptr, 10);
+    return 1;
 }

@@ -1,56 +1,43 @@
-#include <RemoteSerialMonitor.h>
+#include <Arduino.h>
+#include <WiFiS3.h>
+#include "RemoteSerialMonitor.h"
 
-// WiFi credentials
-const char* ssid = "YourWiFiSSID";
-const char* password = "YourWiFiPassword";
+// AP情報
+const char* AP_SSID = "ArduinoR4_AP";
+const char* AP_PASS = "arduino123";
 
-void setup() {
-  // Initialize standard Serial for debugging
+void setup(){
+  pinMode(LED_BUILTIN, OUTPUT);
+  // 必要なら通常のSerialも
   Serial.begin(115200);
-  
-  // Configure RemoteSerial with WiFi credentials
-  RemoteSerial.setWiFiCredentials(ssid, password);
-  RemoteSerial.setServerPort(80); // Optional: default is 80
-  
-  // Start the remote serial monitor
-  if (RemoteSerial.begin()) {
-    Serial.println("Remote Serial Monitor started!");
-    Serial.print("Open your browser to: http://");
-    Serial.println(RemoteSerial.getLocalIP());
-    
-    // Send initial messages
-    RemoteSerial.info("System initialized");
-    RemoteSerial.debug("Debug messages enabled");
-  } else {
-    Serial.println("Failed to start Remote Serial Monitor");
+  delay(300);
+
+  // APで起動
+  if (!RemoteSerial.beginAP(AP_SSID, AP_PASS)) {
+    Serial.println("AP start failed");
+    while (1) { digitalWrite(LED_BUILTIN, HIGH); delay(200); digitalWrite(LED_BUILTIN, LOW); delay(200); }
   }
+  RemoteSerial.beginServer();
+
+  Serial.print("AP SSID: "); Serial.println(AP_SSID);
+  Serial.print("AP PASS: "); Serial.println(AP_PASS);
+  Serial.print("AP IP  : "); Serial.println(RemoteSerial.localIP());
+
+  // 初期メッセージ
+  RemoteSerial.println("RemoteSerial started.");
+  RemoteSerial.printf("Connect to SSID '%s' and open http://%s/ \n",
+                   AP_SSID, RemoteSerial.localIP().toString().c_str());
 }
 
-void loop() {
-  // IMPORTANT: Call loop() regularly for non-blocking operation
-  RemoteSerial.loop();
-  
-  // Example: Log sensor data every 5 seconds
-  static unsigned long lastLog = 0;
-  if (millis() - lastLog > 5000) {
-    int sensorValue = analogRead(A0);
-    
-    RemoteSerial.info("Sensor reading: " + String(sensorValue));
-    
-    // Log with different levels based on value
-    if (sensorValue > 800) {
-      RemoteSerial.warning("High sensor value detected!");
-    } else if (sensorValue < 200) {
-      RemoteSerial.error("Low sensor value - check connection!");
-    }
-    
-    lastLog = millis();
+void loop(){
+  // 必須：HTTP処理
+  RemoteSerial.handle();
+
+  // デモ：1秒ごとに擬似センサ値を送る
+  static uint32_t t0 = millis();
+  if (millis() - t0 > 1000){
+    t0 += 1000;
+    int val = analogRead(A0);
+    RemoteSerial.printf("A0=%d\n", val);
   }
-  
-  // Example: Use RemoteSerial like Serial
-  RemoteSerial.print("Current millis: ");
-  RemoteSerial.println(String(millis()));
-  
-  // Small delay to prevent flooding
-  delay(1000);
 }
