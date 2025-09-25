@@ -49,7 +49,7 @@ void loop() {
   
   // Example: Use RemoteSerial like Serial
   RemoteSerial.print("Current millis: ");
-  RemoteSerial.println(millis());
+  RemoteSerial.println(String(millis()));
   
   // Small delay to prevent flooding
   delay(1000);

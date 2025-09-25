@@ -46,10 +46,13 @@ public:
   }
   
   static int getFreeMemory() {
-    // Simplified memory check - implementation may vary by platform
-    extern int __heap_start, *__brkval;
-    int v;
-    return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval);
+    #if defined(ARDUINO_ARCH_AVR)
+      extern int __heap_start, *__brkval;
+      int v;
+      return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+    #else
+      return 0; // TODO: ARM向け実装（必要なら別途）
+    #endif
   }
   
   static void benchmark(const String& taskName, void (*task)()) {

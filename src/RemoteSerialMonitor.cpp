@@ -86,6 +86,7 @@ void RemoteSerialMonitor::end() {
   }
   
   if (server) {
+    server->end();
     delete server;
     server = nullptr;
   }

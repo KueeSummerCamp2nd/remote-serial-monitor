@@ -9,9 +9,9 @@
 
 // Configuration constants
 #define RSM_DEFAULT_PORT 80
-#define RSM_MAX_CLIENTS 4
-#define RSM_BUFFER_SIZE 1024
-#define RSM_MAX_MESSAGE_SIZE 256
+#define RSM_MAX_CLIENTS 1
+#define RSM_BUFFER_SIZE 64
+#define RSM_MAX_MESSAGE_SIZE 96
 #define RSM_WEBSOCKET_TIMEOUT 100
 
 // WebSocket frame types
