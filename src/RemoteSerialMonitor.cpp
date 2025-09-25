@@ -76,12 +76,6 @@ bool RemoteSerialMonitor::begin() {
 }
 
 void RemoteSerialMonitor::end() {
-  if (server) {
-    server->stop();
-    delete server;
-    server = nullptr;
-  }
-  
   // Close all client connections
   for (int i = 0; i < RSM_MAX_CLIENTS; i++) {
     if (clientConnected[i]) {
@@ -89,6 +83,11 @@ void RemoteSerialMonitor::end() {
       clientConnected[i] = false;
       clientIsWebSocket[i] = false;
     }
+  }
+  
+  if (server) {
+    delete server;
+    server = nullptr;
   }
   
   initialized = false;
